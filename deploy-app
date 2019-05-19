@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+"""
+Deploy BigPanda ops-exercise app.
+
+Usage:
+  deploy-app
+  deploy-app -h | --help
+  deploy-app --version
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+"""
+
+import shutil, os, stat, tarfile, subprocess, requests
+from docopt import docopt
+import pygit2
+import configparser
+import urllib.request
+import colorama
+from termcolor import colored
+
+def __printStage(name):
+    if not hasattr(__printStage, "number"):
+        __printStage.number = 0
+    __printStage.number += 1
+    title = "Stage #{0}: {1}".format(__printStage.number, name)
+    print("{0}\n{1}".format(title, len(title) * "-"))
+
+def __executeStage(stageName, stageFunc):
+    __printStage(stageName)
+    try:
+        rc = stageFunc()
+        if not rc in (0, None):
+            print(colored("\nStage failed. \n", 'red'))
+            exit(1)
+    except Exception as e:
+        print(colored("\nStage failed. \n", 'red'))
+        raise e
+    print("\nDone. \n")
+
+def __clearWorkspace():
+    def set_rw(operation, name, exc):
+        os.chmod(name, stat.S_IWRITE)
+        os.remove(name)
+    workspace = config['default']['workspace_dir']
+    if os.path.exists(workspace):
+        shutil.rmtree(workspace, onerror=set_rw)
+
+def __downloadArchive():
+    archive_url = config['default']['archive_url']
+    archive_file = config['default']['archive_destination']
+    archive_extract_path = config['default']['archive_extract_path']
+    print("Downloading...")
+    urllib.request.urlretrieve(archive_url, archive_file) 
+    print("Extracting...")
+    with tarfile.open(archive_file, "r") as tar:
+        tar.extractall(path=archive_extract_path)
+    print("Removing archive file...")
+    os.remove(archive_file)
+
+def __checkoutCode():
+    pygit2.clone_repository(url=config['default']['git_repo'], checkout_branch=config['default']['git_branch'], path=config['default']['workspace_dir'])
+
+def __buildDockerImages():
+    workspace = config['default']['workspace_dir']
+    app_root = "{0}/{1}".format(workspace, config['default']['app_root'])
+    subprocess.Popen(["docker-compose", "build"], env=dict(os.environ, **{"APP_ROOT": app_root})).wait()
+
+def __startContainers():
+    workspace = config['default']['workspace_dir']
+    app_root = "{0}/{1}".format(workspace, config['default']['app_root'])
+    app_port = config['default']['app_port']
+    subprocess.Popen(["docker-compose", "up", "-d"], env=dict(os.environ, **{"APP_ROOT": app_root, "APP_PORT": app_port})).wait()
+
+def __healthcheck():
+    host = os.environ.get("NO_PROXY", "localhost")
+    app_port = config['default']['app_port']
+    healthcheck_path = config['default']['healthcheck_path']
+    url = "http://{0}:{1}{2}".format(host, app_port, healthcheck_path)
+    response = requests.get(url)
+    if not response.status_code == 200:
+        print("Unhealthy!\nResponse content: {0}".format(response.content.decode("utf-8")))
+        return(1)
+
+if __name__ == "__main__":
+    arguments = docopt(__doc__, version='Deployer 1.0')
+    config = configparser.ConfigParser()
+    config.read("config.ini")
+    colorama.init()
+    __executeStage("Clear workspace directory", __clearWorkspace)
+    __executeStage("Checkout code", __checkoutCode)
+    __executeStage("Download Artifacts Archive", __downloadArchive)
+    __executeStage("Docker-Compose Build", __buildDockerImages)
+    __executeStage("Docker-Compose Up", __startContainers)
+    __executeStage("Health-check environment", __healthcheck)
+    print(colored("Deployment completed successfully.", 'green'))
